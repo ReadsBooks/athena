@@ -21,7 +21,6 @@
 // Athena++ headers
 #include "../athena.hpp"                   // macros, enums, FaceField
 #include "../athena_arrays.hpp"            // AthenaArray
-#include "../globals.hpp"                  // Globals
 #include "../bvals/bvals_interfaces.hpp"   // BoundaryFace
 #include "../coordinates/coordinates.hpp"  // Coordinates
 #include "../eos/eos.hpp"                  // EquationOfState
@@ -35,21 +34,6 @@
 #error "This problem generator must be used with general relativity"
 #endif
 
-//use thin disk initial conditions, not the default ones given by this problem generator
-#define THINDISK
-
-//These constants could potentially be added to the input file
-#define THETA0 0.001
-//this constant doesn't really have an influence, rho is renormalized anyways
-#define K_ENTROPY 0.1
-#define H_ASPECT 0.07
-
-#define M_PARAM 0.1
-
-//the floors on gas pressure and density should be chosen such that their K constant approximately matches this constant
-#define TARGET_Kc 0.00069
-
-
 // Declarations
 enum class MagneticFieldConfigs {density, loops};
 void InflowBoundary(MeshBlock *pmb, Coordinates *pcoord, AthenaArray<Real> &prim,
@@ -59,8 +43,6 @@ void OutflowBoundary(MeshBlock *pmb, Coordinates *pcoord, AthenaArray<Real> &pri
     FaceField &bb, Real time, Real dt, int il, int iu, int jl, int ju, int kl, int ku,
     int ngh);
 Real ThetaGrid(Real x, RegionSize rs);
-void Cooling(MeshBlock *pmb, const Real time, const Real dt,
-    const AthenaArray<Real> &prim, const AthenaArray<Real> &prim_scalar, const AthenaArray<Real> &bb, AthenaArray<Real> &cons, AthenaArray<Real> &cons_scalar);
 Real HistorySum(MeshBlock *pmb, int iout);
 
 // File declarations
@@ -72,8 +54,6 @@ void GetBoyerLindquistCoordinates(Real x1, Real x2, Real x3, Real *p_r, Real *p_
 void TransformContravariantFromBoyerLindquist(Real at_bl, Real ar_bl, Real ath_bl,
     Real aph_bl, Real x1, Real x2, Real x3, Real *p_a0, Real *p_a1, Real *p_a2,
     Real *p_a3);
-void TransformContravariantToBoyerLindquist(Real p_a0, Real p_a1, Real p_a2, Real p_a3, Real x1, Real x2, Real x3, Real *at_bl, Real *ar_bl, Real *ath_bl,
-    Real *aph_bl);
 void TransformCovariantFromKerrSchild(Real a_r, Real a_th, Real a_ph, Real x1, Real x2,
     Real x3, Real *p_a_1, Real *p_a_2, Real *p_a_3);
 Real CalculateLFromRPeak(Real r);
@@ -86,18 +66,11 @@ Real IntegratedA1(Real x1_m, Real x1_p, Real x2, Real x3);
 Real IntegratedA2(Real x1, Real x2_m, Real x2_p, Real x3);
 Real IntegratedA3(Real x1, Real x2, Real x3_m, Real x3_p);
 void VectorPotential(Real x1, Real x2, Real x3, Real *p_a_1, Real *p_a_2, Real *p_a_3);
-void curlyF(Real x, Real x0, Real *out);
-void rhof(Real r, Real th, Real pgas_over_rho, Real *rho);
-void rhofraw(Real r, Real theta, Real pgas_over_rho, Real *rho);
-void pgas_over_rhof(Real r, Real log_h, Real *pgas_over_rho);
-Real ChristoffelSymbol(int a, int b, int c, Real r, Real sth);
 } // namespace
 
 // File variables
 namespace {
-Real betainp;                                 // magnetic field renormalization parameter
-Real theta_nocool;                            // Cooling function parameter
-Real m, a, r_isco;                            // black hole parameters
+Real m, a;                                    // black hole parameters
 Real h_grid;                                  // grid compression parameter
 Real gamma_adi;                               // adiabatic index
 Real rho_min, rho_pow, pgas_min, pgas_pow;    // background parameters
@@ -118,9 +91,6 @@ Real pgas_over_rho_peak, rho_amp;             // calculated torus parameters
 Real sin_tilt, cos_tilt;                      // calculated tilt parameters
 int num_flux_radii;                           // number of spheres to use
 Real *flux_radii;                             // locations to calculate fluxes
-AthenaArray<Real> gcov, gcon;                 // metric coefficients
-AthenaArray<Real> gcov_temp, gcov_temp_alt;   // scratch covariant metric coefficients
-AthenaArray<Real> gcon_temp, gcon_temp_alt;   // scratch contravariant metric coefficients
 } // namespace
 
 //----------------------------------------------------------------------------------------
@@ -147,33 +117,11 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
     h_grid = pin->GetOrAddReal("coord", "h", 1.0);
   }
 
-
-
-
-
-  betainp = pin->GetReal("problem", "beta_inp");
-  theta_nocool = pin->GetReal("problem", "theta_nocool");
-
   // Read fluid parameters from input file
   gamma_adi = pin->GetReal("hydro", "gamma");
 
   // Read torus parameters from input file
   prograde = pin->GetBoolean("problem", "prograde");
-
-
-  // r_isco = pin->GetReal("coord", "r_isco");
-  // is now instead calculated using the formula from https://duetosymmetry.com/tool/kerr-calculator-v2/
-  Real z1 = 1.0 + std::cbrt(1.0 - SQR(a/m)) * (std::cbrt(1.0 + a/m) + std::cbrt(1.0 - a/m));
-  Real z2 = std::sqrt(3.0 * SQR(a/m) + SQR(z1));
-  Real zz = std::sqrt((3.0 - z1) * (3.0 + z1 + 2.0 * z2));
-  if (prograde) {
-    r_isco = 3.0 + z2 - zz;
-  } else {
-    r_isco = 3.0 + z2 + zz;
-  }
-  r_isco *= m;
-  //std::cout << "r_isco: " << r_isco << std::endl;
-
   r_edge = pin->GetReal("problem", "r_edge");
   r_peak = pin->GetReal("problem", "r_peak");
   if (r_peak < 0.0) {
@@ -277,16 +225,9 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
   log_h_edge = LogHAux(r_edge, 1.0);
   log_h_peak = LogHAux(r_peak, 1.0) - log_h_edge;
   pgas_over_rho_peak = (gamma_adi - 1.0) / gamma_adi * std::expm1(log_h_peak);
-
-#ifndef THINDISK
   rho_amp = rho_max / std::pow(pgas_over_rho_peak, 1.0 / (gamma_adi - 1.0));
-#endif
-
   sin_tilt = std::sin(tilt);
   cos_tilt = std::cos(tilt);
-
-  EnrollUserExplicitSourceFunction(Cooling);
-
   return;
 }
 
@@ -312,67 +253,20 @@ void Mesh::UserWorkAfterLoop(ParameterInput *pin) {
 //   User arrays are metric and its inverse.
 
 void MeshBlock::InitUserMeshBlockData(ParameterInput *pin) {
-
-
   // Allocate space for user output variables
   if (MAGNETIC_FIELDS_ENABLED) {
-    AllocateUserOutputVariables(2+4+3);
+    AllocateUserOutputVariables(2);
     SetUserOutputVariableName(0, "gamma");
     SetUserOutputVariableName(1, "pmag");
-    SetUserOutputVariableName(2, "u0");
-    SetUserOutputVariableName(3, "u1");
-    SetUserOutputVariableName(4, "u2");
-    SetUserOutputVariableName(5, "u3");
-    SetUserOutputVariableName(6, "q1");
-    SetUserOutputVariableName(7, "q2");
-    SetUserOutputVariableName(8, "q3");
   } else {
-    AllocateUserOutputVariables(1+4);
+    AllocateUserOutputVariables(1);
     SetUserOutputVariableName(0, "gamma");
-    SetUserOutputVariableName(1, "u0");
-    SetUserOutputVariableName(2, "u1");
-    SetUserOutputVariableName(3, "u2");
-    SetUserOutputVariableName(4, "u3");
   }
 
   // Allocate space for scratch arrays
   AllocateRealUserMeshBlockDataField(num_flux_radii > 0 ? 5 : 2);
   ruser_meshblock_data[0].NewAthenaArray(NMETRIC, ie + NGHOST + 1);
   ruser_meshblock_data[1].NewAthenaArray(NMETRIC, ie + NGHOST + 1);
-
-  if (lid == 0) {
-    int block_num_1 = pin->GetInteger("meshblock", "nx1");
-    int block_num_2 = pin->GetInteger("meshblock", "nx2");
-    int block_num_3 = pin->GetInteger("meshblock", "nx3");
-    // int num_blocks_this_rank = pmy_mesh->GetNumMeshBlocksThisRank(Globals::my_rank);
-    int num_blocks_this_rank = pmy_mesh->nblocal;
-    gcov.NewAthenaArray(num_blocks_this_rank, NMETRIC, block_num_3 + NGHOST,
-                        block_num_2 + NGHOST, block_num_1 + NGHOST);
-    gcon.NewAthenaArray(num_blocks_this_rank, NMETRIC, block_num_3 + NGHOST,
-                        block_num_2 + NGHOST, block_num_1 + NGHOST);
-    gcov_temp.NewAthenaArray(num_blocks_this_rank, NMETRIC, block_num_1 + 2 * NGHOST + 1);
-    gcov_temp_alt.NewAthenaArray(num_blocks_this_rank, NMETRIC,
-                                 block_num_1 + 2 * NGHOST + 1);
-    gcon_temp.NewAthenaArray(num_blocks_this_rank, NMETRIC, block_num_1 + 2 * NGHOST + 1);
-    gcon_temp_alt.NewAthenaArray(num_blocks_this_rank, NMETRIC,
-                                 block_num_1 + 2 * NGHOST + 1);
-  }
-  // Store metric coefficients
-  AthenaArray<Real> gcov_slice, gcon_slice;
-  gcov_slice.NewAthenaArray(NMETRIC, ie + NGHOST);
-  gcon_slice.NewAthenaArray(NMETRIC, ie + NGHOST);
-  for (int k = ks; k <= ke; ++k) {
-    for (int j = js; j <= je; ++j) {
-      pcoord->CellMetric(k, j, is, ie, gcov_slice, gcon_slice);
-      for (int n = 0; n < NMETRIC; ++n) {
-        for (int i = is; i <= ie; ++i) {
-          gcov(lid,n,k,j,i) = gcov_slice(n,i);
-          gcon(lid,n,k,j,i) = gcon_slice(n,i);
-        }
-      }
-    }
-  }
-
 
   // Allocate space for history variable computation
   if (num_flux_radii > 0) {
@@ -421,6 +315,7 @@ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin) {
 //     Fishbone & Moncrief 1976, ApJ 207 962 (FM)
 //     Fishbone 1977, ApJ 215 323 (F)
 //   Assumes x3 is axisymmetric direction.
+
 void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   // Prepare index bounds
   int il = is - NGHOST;
@@ -437,6 +332,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
     kl -= NGHOST;
     ku += NGHOST;
   }
+
   // Prepare scratch arrays
   AthenaArray<Real> &g = ruser_meshblock_data[0];
   AthenaArray<Real> &gi = ruser_meshblock_data[1];
@@ -450,6 +346,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         Real x1 = pcoord->x1v(i);
         Real x2 = pcoord->x2v(j);
         Real x3 = pcoord->x3v(k);
+
         // Calculate spherical Kerr-Schild coordinates of cell
         Real r, th, ph;
         GetKerrSchildCoordinates(x1, x2, x3, &r, &th, &ph);
@@ -496,21 +393,13 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
         Real uu1 = 0.0;
         Real uu2 = 0.0;
         Real uu3 = 0.0;
-        Real trho;
-        Real pgas_over_rho;
-        pgas_over_rhof(r,log_h,&pgas_over_rho);
-        rhof(r_bl, th_bl, pgas_over_rho, &trho);
-#ifdef THINDISK
-        in_torus = r_bl >= r_edge;
-#endif
+
         // Overwrite primitives inside torus
         if (in_torus) {
           // Calculate thermodynamic variables
-          if(trho * rho_amp > rho)
-            rho = trho * rho_amp;
-
-          if(pgas_over_rho * rho > pgas)
-            pgas = pgas_over_rho * rho;
+          Real pgas_over_rho = (gamma_adi - 1.0) / gamma_adi * std::expm1(log_h);
+          rho = rho_amp * std::pow(pgas_over_rho, 1.0 / (gamma_adi - 1.0));
+          pgas = pgas_over_rho * rho;
 
           // Calculate velocities in Boyer-Lindquist coordinates
           Real u0_bl, u1_bl, u2_bl, u3_bl;
@@ -519,8 +408,7 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
 
           // Transform to preferred coordinates
           Real u0, u1, u2, u3;
-
-          TransformContravariantFromBoyerLindquist(u0_bl, u1_bl, u2_bl, u3_bl, x1, x2, x3,
+          TransformContravariantFromBoyerLindquist(u0_bl, 0.0, u2_bl, u3_bl, x1, x2, x3,
               &u0, &u1, &u2, &u3);
           uu1 = u1 - gi(I01,i) / gi(I00,i) * u0;
           uu2 = u2 - gi(I02,i) / gi(I00,i) * u0;
@@ -628,119 +516,11 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
   // Initialize conserved values
   peos->PrimitiveToConserved(phydro->w, pfield->bcc, phydro->u, pcoord, il, iu, jl, ju,
       kl, ku);
-#ifndef POSTPROBLEMGENERATOR
+
   // Call user work function to set output variables
   UserWorkInLoop();
-#endif
   return;
 }
-#ifdef POSTPROBLEMGENERATOR
-void MeshBlock::Rhomax(ParameterInput *pin, Real& rhomax) {
-#ifdef THINDISK
-  MeshBlock* mb = this;
-      Coordinates* coords = mb->pcoord;
-      // Prepare index bounds
-            int il = is - NGHOST;
-            int iu = ie + NGHOST;
-            int jl = js;
-            int ju = je;
-            if (block_size.nx2 > 1) {
-              jl -= NGHOST;
-              ju += NGHOST;
-            }
-            int kl = ks;
-            int ku = ke;
-            if (block_size.nx3 > 1) {
-              kl -= NGHOST;
-              ku += NGHOST;
-            }
-      for(int j=jl; j<=ju; j++){
-        Real x2 = coords->x2v(j);
-        for(int i=il; i<=iu; i++){
-          Real x1 = coords->x1v(i);
-          Real r, th, ph;
-          GetKerrSchildCoordinates(x1, x2, 0.0, &r, &th, &ph);
-
-          if (r < r_edge) continue;
-          Real rho;
-          rhofraw(r,th, 0.0, &rho);
-          if(rho > rhomax) rhomax=rho;
-        }
-      }
-#else
-      rhomax=-1;
-#endif
-}
-
-void MeshBlock::setRhoMax(Real rhomax) {
-#ifdef THINDISK
-  rho_amp = 1.0/rhomax;
-#endif
-}
-void MeshBlock::PostProblemGenerator(ParameterInput *pin, Real b_sq_max, Real pgas_max){
-  // Prepare index bounds
-  int il = is - NGHOST;
-  int iu = ie + NGHOST;
-  int jl = js;
-  int ju = je;
-  if (block_size.nx2 > 1) {
-    jl -= NGHOST;
-    ju += NGHOST;
-  }
-  int kl = ks;
-  int ku = ke;
-  if (block_size.nx3 > 1) {
-    kl -= NGHOST;
-    ku += NGHOST;
-  }
-  if(b_sq_max!=0.0 && MAGNETIC_FIELDS_ENABLED){
-    Real b_sq_new = 2 * pgas_max/betainp;
-    Real renorm = std::sqrt(b_sq_new/b_sq_max);
-    for (int k = kl; k <= ku; ++k) {
-      for (int j = jl; j <= ju; ++j) {
-        for (int i = il; i <= iu; ++i) {
-          pfield->b.x1f(k,j,i) *= renorm;
-          pfield->b.x2f(k,j,i) *= renorm;
-          pfield->b.x3f(k,j,i) *= renorm;
-          pfield->bcc(IB1,k,j,i)*=renorm;
-          pfield->bcc(IB2,k,j,i)*=renorm;
-          pfield->bcc(IB3,k,j,i)*=renorm;
-          //WTF???? I have np idea why renprming x-f doesnt work for bcc as well, CalculateCellCenteredFields should ne linear!But somehow proper results are only achieved using the above.
-          //no idea if this works properly, lets hope it does
-          //wtf? somethign fishy is going on, the above should be equivalent to the outcome of calccellcenteredfields applied to b.x-f, but it is not???
-          //calculate four-B-field in this cell for face centered magnetic fields. Actually not required, normalization factor goes through
-          //renormalize B_field with sqrt(B_sq)_new/sqrt(B_sq)_old
-          //calculate projected three-B-field from projection,put it back into the array??? First part actually not required...
-          //recalculate the cell centered field
-          //redo PrimitiveToConserved?
-          //do userworkinloop
-        }
-      }
-    }
-    //    pfield->b.x1f(ku+1,ju,iu) *= renorm;
-    //    pfield->b.x2f(ku+1,ju,iu) *= renorm;
-    pfield->b.x3f(ku+1,ju,iu) *= renorm;
-
-    //    pfield->b.x1f(ku,ju+1,iu) *= renorm;
-    pfield->b.x2f(ku,ju+1,iu) *= renorm;
-    //    pfield->b.x3f(ku,ju+1,iu) *= renorm;
-
-    pfield->b.x1f(ku,ju,iu+1) *= renorm;
-    //    pfield->b.x2f(ku,ju,iu+1) *= renorm;
-    //    pfield->b.x3f(ku,ju,iu+1) *= renorm;
-  }
-  if(MAGNETIC_FIELDS_ENABLED) {
-    // Calculate cell-centered magnetic field. see notice above
-    //pfield->CalculateCellCenteredField(pfield->b, pfield->bcc, pcoord, il, iu, jl, ju, kl, ku);
-  }
-  // (Re-)Initialize conserved values
-  peos->PrimitiveToConserved(phydro->w, pfield->bcc, phydro->u, pcoord, il, iu, jl, ju,
-      kl, ku);
-
-  // Call user work function to set output variables
-  UserWorkInLoop();
-}
-#endif
 
 //----------------------------------------------------------------------------------------
 // Function responsible for storing history quantities for output
@@ -843,7 +623,6 @@ void MeshBlock::UserWorkInLoop() {
 //   Writes to user_out_var array the following quantities:
 //     0,k,j,i: gamma (normal-frame Lorentz factor)
 //     1,k,j,i: pmag (fluid-frame magnetic pressure, if magnetic fields enabled)
-//     2..5,k,j,i: contravariant 4-velocity in boyer-lindquist coordinates (1..4 if not magnetic fields enabled)
 
 void MeshBlock::UserWorkBeforeOutput(ParameterInput *pin) {
   // Prepare scratch arrays
@@ -855,11 +634,6 @@ void MeshBlock::UserWorkBeforeOutput(ParameterInput *pin) {
     for (int j = js; j <= je; ++j) {
       pcoord->CellMetric(k, j, is, ie, g, gi);
       for (int i = is; i <= ie; ++i) {
-        // Extract preferred coordinates of cell
-        Real x1 = pcoord->x1v(i);
-        Real x2 = pcoord->x2v(j);
-        Real x3 = pcoord->x3v(k);
-
         // Calculate normal-frame Lorentz factor
         Real uu1 = phydro->w(IVX,k,j,i);
         Real uu2 = phydro->w(IVY,k,j,i);
@@ -878,15 +652,6 @@ void MeshBlock::UserWorkBeforeOutput(ParameterInput *pin) {
         Real u3 = uu3 - alpha * gamma * gi(I03,i);
         Real u_0, u_1, u_2, u_3;
         pcoord->LowerVectorCell(u0, u1, u2, u3, k, j, i, &u_0, &u_1, &u_2, &u_3);
-
-        Real u0_bl, u1_bl, u2_bl, u3_bl;
-        TransformContravariantToBoyerLindquist(u0, u1, u2, u3, x1, x2, x3, &u0_bl, &u1_bl, &u2_bl, &u3_bl);
-
-        int offset = MAGNETIC_FIELDS_ENABLED ? 0 : -1;
-        user_out_var(2+offset,k,j,i) = u0_bl;
-        user_out_var(3+offset,k,j,i) = u1_bl;
-        user_out_var(4+offset,k,j,i) = u2_bl;
-        user_out_var(5+offset,k,j,i) = u3_bl;
 
         // Calculate 4-magnetic field
         Real bb1 = 0.0, bb2 = 0.0, bb3 = 0.0;
@@ -907,58 +672,6 @@ void MeshBlock::UserWorkBeforeOutput(ParameterInput *pin) {
         Real b_sq = b0 * b_0 + b1 * b_1 + b2 * b_2 + b3 * b_3;
         if (MAGNETIC_FIELDS_ENABLED) {
           user_out_var(1,k,j,i) = b_sq / 2.0;
-          //Calculation of quality factors according to Porth et al. 2019, Takahashi 2008, New Frontiers of GRMHD (Bambi et al. 2025) and the Athena docs
-          Real r,th,ph;
-          GetKerrSchildCoordinates(x1,x2,x3, &r, &th, &ph);
-
-          Real sigma = SQR(r) + SQR(a) * SQR(std::cos(th));                       // \Sigma
-          Real betar = (2*m*r/sigma) / (1 + 2*m*r/sigma);
-
-
-          Real n_0,n_1,n_2,n_3;
-          n_0 = -alpha;
-          n_1 = 0.0;
-          n_2 = 0.0;
-          n_3 = 0.0;
-          Real n0,n1,n2,n3;
-          pcoord->RaiseVectorCell(n_0, n_1, n_2, n_3, k, j, i, &n0, &n1, &n2, &n3);
-          Real yrr = gi(I11,i) + n1*n1;
-          Real y_thth = g(I22,i);
-          Real y_phph = g(I33,i);
-          Real y_rph = g(I13,i);
-
-          Real omega = u3 / u0;
-          Real rho = phydro->w(IDN,k,j,i);
-          Real pgas = phydro->w(IPR,k,j,i);
-          Real adiabatic = gamma_adi;
-          Real wgas = rho + adiabatic/(adiabatic-1.0)*pgas;
-          Real wtot = b_sq + wgas;
-          Real lambdafactor = TWO_PI / (omega*std::sqrt(wtot));
-
-          Real istyrr = 1.0 / std::sqrt(yrr);
-          Real sty_phph = std::sqrt(y_phph);
-          Real sty_thth = std::sqrt(y_thth);
-
-          Real lambdar = lambdafactor * (b0*betar*istyrr + b1*istyrr);
-          Real lambdath = lambdafactor * (b2*sty_thth);
-          Real lambdaph = lambdafactor * (b0*betar*y_rph/sty_phph + b1*y_rph/sty_phph + b3*sty_phph);
-
-          Real dr = pcoord->dx1f(i);
-          Real dth = pcoord->dx2f(j);
-          Real dph = pcoord->dx3f(k);
-          //finally calculate quality factors
-          Real qr = std::abs(lambdar / (dr*istyrr));
-          Real qth = std::abs(lambdath / (dth*sty_thth));
-          Real qph = std::abs(lambdaph / (dph*sty_phph));
-
-          //jet region otherwise gets insane values like >1e6...
-          //if required, we can also do that in the analysis part...
-          //qr = std::min(qr, 12.0);
-          //qth = std::min(qth, 12.0);
-          //qph = std::min(qph, 24.0);
-          user_out_var(6+offset,k,j,i) = qr;
-          user_out_var(7+offset,k,j,i) = qth;
-          user_out_var(8+offset,k,j,i) = qph;
         }
       }
     }
@@ -1088,8 +801,7 @@ void OutflowBoundary(MeshBlock *pmb, Coordinates *pcoord, AthenaArray<Real> &pri
       for (int i = iu + 1; i <= iu + ngh; ++i) {
         prim(IDN,k,j,i) = prim(IDN,k,j,iu);
         prim(IPR,k,j,i) = prim(IPR,k,j,iu);
-        //prim(IVX,k,j,i) = std::max(prim(IVX,k,j,iu), static_cast<Real>(0.0));
-        prim(IVX,k,j,i) = std::max(prim(IVX,k,j,iu), static_cast<Real>(0.018));
+        prim(IVX,k,j,i) = std::max(prim(IVX,k,j,iu), static_cast<Real>(0.0));
         prim(IVY,k,j,i) = prim(IVY,k,j,iu);
         prim(IVZ,k,j,i) = prim(IVZ,k,j,iu);
       }
@@ -1169,105 +881,6 @@ Real HistorySum(MeshBlock *pmb, int iout) {
   return pmb->ruser_meshblock_data[4](iout/4,iout%4);
 }
 
-
-
-
-//----------------------------------------------------------------------------------------
-// Cooling function
-
-void Cooling(MeshBlock *pmb, const Real time, const Real dt,
-    const AthenaArray<Real> &prim, const AthenaArray<Real> &prim_scalar,
-     const AthenaArray<Real> &bb, AthenaArray<Real> &cons, AthenaArray<Real> &cons_scalar) {
-
-  // Prepare index bounds
-  int lid = pmb->lid;
-  int is = pmb->is;
-  int ie = pmb->ie;
-  int js = pmb->js;
-  int je = pmb->je;
-  int ks = pmb->ks;
-  int ke = pmb->ke;
-
-  // Go through all cells
-  for (int k = ks; k <= ke; ++k) {
-    for (int j = js; j <= je; ++j) {
-      for (int i = is; i <= ie; ++i) {
-        Real x = pmb->pcoord->x1v(i);
-        Real y = pmb->pcoord->x2v(j);
-        Real z = pmb->pcoord->x3v(k);
-        Real r, th, ph;
-        GetKerrSchildCoordinates(x, y, z, &r, &th, &ph);
-
-        Real uu1 = prim(IVX,k,j,i);
-        Real uu2 = prim(IVY,k,j,i);
-        Real uu3 = prim(IVZ,k,j,i);
-        Real tmp = gcov(lid,I11,k,j,i) * uu1 * uu1 + 2.0 * gcov(lid,I12,k,j,i) * uu1 * uu2
-            + 2.0 * gcov(lid,I13,k,j,i) * uu1 * uu3 + gcov(lid,I22,k,j,i) * uu2 * uu2
-            + 2.0 * gcov(lid,I23,k,j,i) * uu2 * uu3 + gcov(lid,I33,k,j,i) * uu3 * uu3;
-        Real gamma = std::sqrt(1.0 + tmp);
-
-        Real alpha = std::sqrt(-1.0 / gcon(lid,I00,k,j,i));
-        Real u0 = gamma / alpha;
-        Real u1 = uu1 - alpha * gamma * gcon(lid,I01,k,j,i);
-        Real u2 = uu2 - alpha * gamma * gcon(lid,I02,k,j,i);
-        Real u3 = uu3 - alpha * gamma * gcon(lid,I03,k,j,i);
-        Real u_0, u_1, u_2, u_3;
-        pmb->pcoord->LowerVectorCell(u0, u1, u2, u3, k, j, i, &u_0, &u_1, &u_2, &u_3);
-
-        Real b_sq = 0.0;
-        if (MAGNETIC_FIELDS_ENABLED) {
-          Real bb1 = pmb->pfield->bcc(IB1,k,j,i);
-          Real bb2 = pmb->pfield->bcc(IB2,k,j,i);
-          Real bb3 = pmb->pfield->bcc(IB3,k,j,i);
-          Real b0 = u_1 * bb1 + u_2 * bb2 + u_3 * bb3;
-          Real b1 = (bb1 + b0 * u1) / u0;
-          Real b2 = (bb2 + b0 * u2) / u0;
-          Real b3 = (bb3 + b0 * u3) / u0;
-          Real b_0, b_1, b_2, b_3;
-          pmb->pcoord->LowerVectorCell(b0, b1, b2, b3, k, j, i, &b_0, &b_1, &b_2, &b_3);
-          b_sq = b0 * b_0 + b1 * b_1 + b2 * b_2 + b3 * b_3;
-        }
-
-        Real rho = prim(IDN,k,j,i);
-        Real pgas = prim(IPR,k,j,i);
-        Real K = pgas / pow(rho, gamma_adi);
-        Real u_g = pgas/(gamma_adi-1);
-
-        Real R = r*sin(th);
-        Real omega_k = 1./(a + pow(R,1.5));
-
-        Real tau_cool = 2 * M_PI / omega_k ;
-#ifdef TARGET_Kc
-        Real K_c = TARGET_Kc;
-#else
-        Real K_c = pgas_min / pow(rho_min, gamma_adi);
-#endif
-        //Real shape_theta = exp(-1*pow((th - (M_PI/2)),2) / 2*theta_nocool*theta_nocool);
-        //Real shape_theta = exp(-1*pow((th - (M_PI/2)),2) / (2*theta_nocool*theta_nocool));
-        Real shape_theta = exp(-1*SQR(th - M_PI_2) / (2.0 * SQR(theta_nocool)));
-        Real lnKkc = log(K / K_c);
-        Real U_tau = 0;
-        if(dt < tau_cool && lnKkc > 0) {
-          U_tau = -1 * u_g * (lnKkc / tau_cool) * shape_theta;
-        }
-        else{
-          U_tau = 0;
-        }
-        //What are these conditions? Especially the second, with the hardcoded 10??? that was not in Penna2010
-        if(r <= (1 + sqrt(1 - a*a))) U_tau = 0;
-        //if(b_sq/rho >= 10) U_tau = 0;
-
-        // Apply cooling
-        cons(IEN,k,j,i) += U_tau * u_0;
-        cons(IM1,k,j,i) += U_tau * u_1;
-        cons(IM2,k,j,i) += U_tau * u_2;
-        cons(IM3,k,j,i) += U_tau * u_3;
-      }
-    }
-  }
-  return;
-}
-
 //----------------------------------------------------------------------------------------
 // Function for returning corresponding spherical Kerr-Schild coordinates of point
 // Inputs:
@@ -1341,25 +954,6 @@ void TransformContravariantFromBoyerLindquist(Real at_bl, Real ar_bl, Real ath_b
     *p_a1 = NAN;
     *p_a2 = NAN;
     *p_a3 = NAN;
-  }
-  return;
-}
-} // namespace
-
-namespace {
-void TransformContravariantToBoyerLindquist(Real p_a0, Real p_a1, Real p_a2, Real p_a3, Real x1, Real x2, Real x3, Real *at_bl, Real *ar_bl, Real *ath_bl,
-    Real *aph_bl) {
-  if (std::strcmp(COORDINATE_SYSTEM, "kerr-schild") == 0) {
-    Real delta = SQR(x1) - 2.0 * m * x1 + SQR(a);
-    *at_bl = p_a0 - 2.0 * m * x1 / delta * p_a1;
-    *ar_bl = p_a1;
-    *ath_bl = p_a2;
-    *aph_bl = p_a3 - a / delta * p_a1;
-  } else {
-    *at_bl = NAN;
-    *ar_bl = NAN;
-    *ath_bl = NAN;
-    *aph_bl = NAN;
   }
   return;
 }
@@ -1521,63 +1115,7 @@ Real LogHAux(Real r, Real sth) {
 //       matches the formula used in Harm (init.c).
 
 namespace {
-#define CH_LIST_INDEX(a,b,c) ( (a)*4*4+(b)*4+(c) )
-/**
- * Returns Gamma^a_bc at cell indices i j k.
- *
- */
-Real ChristoffelSymbol(int a, int b, int c, Real r, Real sth){
-  int index = CH_LIST_INDEX(a,b,c);
-  Real cth = std::sqrt(1.0-SQR(sth));
-  Real sigma = SQR(r)+SQR(a*cth);
-  Real delta = SQR(r)-2*m*r+SQR(a);
-  Real f0,f1;
-  switch (index) {
-    case CH_LIST_INDEX(1,0,0)://^r_t_t
-      return 2*m*delta*(SQR(r)-SQR(a*cth))/(2*CUBE(sigma));
-    case CH_LIST_INDEX(1,3,3)://^r_ph_ph
-      f0 = SQR(r)-SQR(a*cth);
-      f1 = -2*r*SQR(sigma)+2*m*SQR(a*sth)*f0;
-      return delta*SQR(sth)/(2*CUBE(sigma))*f1;
-    case CH_LIST_INDEX(1,0,3)://^r_t_ph
-      f0 = SQR(r)-SQR(a*cth);
-      return -2*m*delta*a*SQR(sth)*f0/(2*CUBE(sigma));
-    default:
-      std::cout << "Unknown or unsupported christoffel symbol index detected, this is not good" << std::endl;
-      return NAN;
-  }
-}
-
 void CalculateVelocityInTorus(Real r, Real sth, Real *p_ut, Real *p_uph) {
-#ifdef THINDISK
-  //Real x = std::sqrt(r);
-  //*p_ut = (a + CUBE(x))/std::sqrt(CUBE(x)*(2*a+CUBE(x)-3*x));
-  //*p_uph = 1/std::sqrt(CUBE(x)*(2*a+CUBE(x)-3*x));
-  Real cth = std::sqrt(1.0-SQR(sth));
-  Real sigma = SQR(r)+SQR(a*cth);
-  Real delta = SQR(r)-2*m*r+SQR(a);
-  //coul have implemented the christoffelsymbols right here, but whatever
-  Real rtt = ChristoffelSymbol(1,0,0,r,sth);
-  Real rphph = ChristoffelSymbol(1,3,3,r,sth);
-  Real rtph = ChristoffelSymbol(1,0,3,r,sth);
-  Real gtt = -(1.0-r*2*m/sigma);
-  Real gphph = (SQR(r)+SQR(a)+2*m*SQR(a)*r*SQR(sth)/sigma)*SQR(sth);
-  Real gtph = -2*2*m*a*r*SQR(sth)/sigma;
-
-  Real A = SQR(rtt);
-  Real B = gtt*(rtt*rphph-2*SQR(rtph))+2*gtph*rtt*rtph-gphph*SQR(rtt);
-  Real C = (SQR(rtph)-rtt*rphph)*SQR(gtph*rtt-gtt*rtph);
-  Real uph = std::sqrt(A/(B+2*std::sqrt(C)));
-
-  Real p_2 = gtph/gtt*uph;
-  Real q = gphph/gtt*SQR(uph)+1.0/gtt;
-  Real ut = -p_2+std::sqrt(SQR(p_2)-q);
-  //std::cout << *p_ut << " - " << *p_uph << std::endl;
-  //std::cout << ut << " - " << uph << std::endl;
-  //std::cout << "---" << std::endl;
-  *p_ut = ut;
-  *p_uph = uph;
-#else
   Real sth2 = SQR(sth);
   Real cth2 = 1.0 - sth2;
   Real delta = SQR(r) - 2.0 * m * r + SQR(a);                // \Delta
@@ -1604,7 +1142,6 @@ void CalculateVelocityInTorus(Real r, Real sth, Real *p_ut, Real *p_uph) {
   Real u0 = -1.0 / g_00 * (g_03 * u3 + u0_b);
   *p_ut = u0;
   *p_uph = u3;
-#endif
   return;
 }
 } // namespace
@@ -1859,32 +1396,13 @@ void VectorPotential(Real x1, Real x2, Real x3, Real *p_a_1, Real *p_a_2, Real *
     sth_bl_t = std::hypot(x_bl_t, y_bl_t);
   }
 
-
-  Real a_r, a_th_t, a_ph_t;
-
-#ifdef THINDISK
-  Real r_eff = r_bl;
-//  if(r_bl < r_edge){
-//    r_eff = r_edge;
-//  }
-  Real pref = std::pow(r_eff*sth, 3.0/4.0);
-  Real tanth = 1.0/SQR(std::tan(th));
-  Real mpow = std::pow(M_PARAM, 5.0/4.0);
-  Real frac = mpow/std::pow(1.0+tanth, 5.0/8.0);
-  Real Aphi = pref * frac;
-  a_r = 0.0;
-  a_th_t = 0.0;
-  a_ph_t = Aphi;
-
-  //do we have to transform this to covariant kerr schild??
-#else
   // Determine if we are in the magnetized torus
-    if (r_bl < r_edge) {
-      *p_a_1 = 0.0;
-      *p_a_2 = 0.0;
-      *p_a_3 = 0.0;
-      return;
-    }
+  if (r_bl < r_edge) {
+    *p_a_1 = 0.0;
+    *p_a_2 = 0.0;
+    *p_a_3 = 0.0;
+    return;
+  }
   Real log_h = LogHAux(r_bl, sth_bl_t) - log_h_edge;  // (FM 3.6)
   if (log_h < 0.0) {
     *p_a_1 = 0.0;
@@ -1901,14 +1419,12 @@ void VectorPotential(Real x1, Real x2, Real x3, Real *p_a_1, Real *p_a_2, Real *
   }
 
   // Calculate thermodynamic variables
-  Real pgas_over_rho;// = (gamma_adi - 1.0) / gamma_adi * std::expm1(log_h);
-  pgas_over_rhof(r, log_h,&pgas_over_rho);
-  Real rho;// = rho_amp * std::pow(pgas_over_rho, 1.0 / (gamma_adi - 1.0));
-  rhof(r,th,pgas_over_rho,&rho);
-  rho = rho * rho_amp;
+  Real pgas_over_rho = (gamma_adi - 1.0) / gamma_adi * std::expm1(log_h);
+  Real rho = rho_amp * std::pow(pgas_over_rho, 1.0 / (gamma_adi - 1.0));
   Real pgas = pgas_over_rho * rho;
 
   // Density isocontour configuration
+  Real a_r, a_th_t, a_ph_t;
   if (field_config == MagneticFieldConfigs::density) {
     Real rho_cut = std::max(rho - pot_rho_cutoff, static_cast<Real>(0.0));
     a_r = 0.0;
@@ -1933,7 +1449,6 @@ void VectorPotential(Real x1, Real x2, Real x3, Real *p_a_1, Real *p_a_2, Real *
     *p_a_3 = NAN;
     return;
   }
-#endif
 
   // Account for tilt
   Real a_th, a_ph;
@@ -1960,95 +1475,9 @@ void VectorPotential(Real x1, Real x2, Real x3, Real *p_a_1, Real *p_a_2, Real *
   a_r *= pot_amp;
   a_th *= pot_amp;
   a_ph *= pot_amp;
+
   // Transform to preferred coordinates
   TransformCovariantFromKerrSchild(a_r, a_th, a_ph, x1, x2, x3, p_a_1, p_a_2, p_a_3);
   return;
 }
 } // namespace
-
-namespace {
-void curlyF(Real x, Real x0, Real *out){
-  Real as = a;
-  Real s1 = 2*std::cos(1/3.0*std::acos(as) - PI/3.0);
-  Real s2 = 2*std::cos(1/3.0*std::acos(as) + PI/3.0);
-  Real s3 = -2*std::cos(1/3.0*std::acos(as));
-  Real prefactor0 = 3/(2*x*x*(2*as+x*x*x-3*x));
-  Real prefactor1 = 3*SQR(s1-as)/(s1*(s1-s2)*(s1-s3));
-  Real prefactor2 = 3*SQR(s2-as)/(s2*(s2-s1)*(s2-s3));
-  Real prefactor3 = 3*SQR(s3-as)/(s3*(s3-s1)*(s3-s2));
-  Real ln0 = std::log(x/x0);
-  Real ln1 = std::log((x-s1)/(x0-s1));
-  Real ln2 = std::log((x-s2)/(x0-s2));
-  Real ln3 = std::log((x-s3)/(x0-s3));
-  Real term0 = x-x0-3.0/2.0*ln0;
-  Real term1 = -prefactor1*ln1;
-  Real term2 = -prefactor2*ln2;
-  Real term3 = -prefactor3*ln3;
-  Real combterm = term0+term1+term2+term3;
-  *out = prefactor0 * combterm;
-}
-}
-
-namespace {
-void pgas_over_rhof(Real r, Real log_h, Real *pgas_over_rho) {
-#ifdef THINDISK
-  Real x = std::sqrt(r);
-  Real x0 = std::sqrt(r_isco);
-  Real curlyf;
-  curlyF(x,x0,&curlyf);
-  *pgas_over_rho = THETA0 * std::pow(curlyf/r, 1/4.0);
-#else
-  *pgas_over_rho = (gamma_adi - 1.0) / gamma_adi * std::expm1(log_h);
-#endif
-}
-}
-
-namespace {
-void rhof(Real r, Real theta, Real pgas_over_rho, Real *rho){
-  rhofraw(r, theta, pgas_over_rho, rho);
-}
-void rhofraw(Real r, Real theta, Real pgas_over_rho, Real *rho){
-#ifdef THINDISK
-  Real gam = gamma_adi;
-  Real x = std::sqrt(r);
-  Real x0 = std::sqrt(r_isco);
-  Real curlyf;
-  curlyF(x,x0,&curlyf);
-  Real rhoe = std::pow(curlyf/r, 1/(4.0*(gam-1.0))) * std::pow(THETA0/K_ENTROPY, 1/(gam-1.0));
-  *rho = rhoe*std::exp(-4.0*SQR(std::cos(theta)) / SQR(H_ASPECT));
-#else
-  *rho=std::pow(pgas_over_rho, 1.0 / (gamma_adi - 1.0));
-#endif
-}
-}
-
-
-//// Only for modified initial conditions
-//namespace {
-//void rhoMaxf(Mesh *pmy_mesh, Real *rhomax){
-//  int mbs = pmy_mesh->my_blocks.GetSize();
-//  Real max = 0.0;
-//  for(int a = 0; a<mbs; a++){
-//    MeshBlock* mb = pmy_mesh->my_blocks(a);
-//    Coordinates* coords = mb->pcoord;
-//    int is = mb->is;
-//    int ie = mb->ie;
-//    int js = mb->js;
-//    int je = mb->je;
-//    for(int j=0; j<coords->x2v.GetSize(); j++){
-//      Real x2 = coords->x2v(j);
-//      for(int i=0; i<coords->x1v.GetSize(); i++){
-//        Real x1 = coords->x1v(i);
-//        Real r, th, ph;
-//        GetKerrSchildCoordinates(x1, x2, 0.0, &r, &th, &ph);
-//
-//        if (r < r_edge) continue;
-//        Real rho;
-//        rhofraw(r,th, 0.0, &rho);
-//        if(rho > max) max=rho;
-//      }
-//    }
-//  }
-//  *rhomax=max;//1e-11;
-//}
-//}

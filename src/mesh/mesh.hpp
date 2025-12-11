@@ -11,6 +11,11 @@
 //! The Mesh is the overall grid structure, and MeshBlocks are local patches of data
 //! (potentially on different levels) that tile the entire domain.
 
+//flag required for magnetic field renormalization
+#define POSTPROBLEMGENERATOR
+#define INIT_MAX -1e70
+#define INIT_MIN -INIT_MAX
+
 // C headers
 
 // C++ headers
@@ -190,6 +195,12 @@ class MeshBlock {
 
   //! defined in either the prob file or default_pgen.cpp in ../pgen/
   void ProblemGenerator(ParameterInput *pin);
+#ifdef POSTPROBLEMGENERATOR
+  //void FindMax(ParameterInput *pin);
+  void PostProblemGenerator(ParameterInput *pin, Real b_sq_max, Real pgas_max);
+  void Rhomax(ParameterInput *pin, Real& rhomax);
+  void setRhoMax(Real rhomax);
+#endif
   void InitUserMeshBlockData(ParameterInput *pin);
 
   // functions and variables for automatic load balancing based on timing
@@ -370,7 +381,10 @@ class Mesh {
   MGMaskFunc MGGravitySourceMaskFunction_;
   MGMaskFunc MGCRDiffusionSourceMaskFunction_;
   MGMaskFunc MGCRDiffusionCoeffMaskFunction_;
-
+#ifdef POSTPROBLEMGENERATOR
+  void FindMax(ParameterInput *pin, Real& b_sq_max, Real& pgas_max, Real& betamax, Real& betamin, bool usebcc);
+  void FindMaxInternal(int i, int j, int k, Hydro* phydro, Field* pfield, Coordinates* coords, AthenaArray<Real> &g, AthenaArray<Real> &gi, Real& pgas_max, Real& b_sq_max, Real& betamax, Real& betamin, bool usebcc);
+#endif
   void AllocateRealUserMeshDataField(int n);
   void AllocateIntUserMeshDataField(int n);
   void OutputMeshStructure(int dim);

@@ -41,6 +41,7 @@ def main(**kwargs):
         matplotlib.use('agg')
     import matplotlib.pyplot as plt
     import matplotlib.colors as colors
+    from matplotlib.colors import BoundaryNorm, ListedColormap
 
     # Determine refinement level to use
     if kwargs['level'] is not None:
@@ -274,8 +275,19 @@ def main(**kwargs):
             vals_x = dx_dr * vals_r + dx_dtheta * vals_theta
             vals_z = dz_dr * vals_r + dz_dtheta * vals_theta
 
+    if kwargs['abs'] is not None:
+        vals = np.abs(vals)
     # Determine colormapping properties
-    cmap = plt.get_cmap(kwargs['colormap'])
+#    countlvls = 0
+#    lvlsun = [0]
+    if quantities[0] == 'Levels':
+        lvlsun = np.unique(data['Levels'])
+        countlvls = len(lvlsun)
+        base_cmap = plt.get_cmap(kwargs['colormap'])
+        colorsspace = base_cmap(np.linspace(0, 1, countlvls))
+        cmap = ListedColormap(colorsspace)
+    else:
+        cmap = plt.get_cmap(kwargs['colormap'])
     vmin = kwargs['vmin']
     vmax = kwargs['vmax']
     if kwargs['logc']:
@@ -316,11 +328,17 @@ def main(**kwargs):
         else:
             plt.xlabel(r'$x$')
             plt.ylabel(r'$z$')
-    plt.colorbar(im)
+    if quantities[0] == 'Levels':
+        plt.colorbar(im, ticks=lvlsun)
+    else:
+        plt.colorbar(im)
     if kwargs['output_file'] == 'show':
         plt.show()
     else:
-        plt.savefig(kwargs['output_file'], bbox_inches='tight')
+        if kwargs['dpi'] is not None:
+            plt.savefig(kwargs['output_file'], bbox_inches='tight', dpi=kwargs['dpi'])
+        else:
+            plt.savefig(kwargs['output_file'], bbox_inches='tight')
 
 
 # Execute main function
@@ -369,6 +387,7 @@ if __name__ == '__main__':
                         default=None,
                         help=('data value to correspond to colormap maximum; use '
                               '--vmax=<val> if <val> has negative sign'))
+    parser.add_argument('--dpi', type=float, default=None, help='dpi of output file')
     parser.add_argument('--logc',
                         action='store_true',
                         help='flag indicating data should be colormapped logarithmically')
@@ -391,5 +410,6 @@ if __name__ == '__main__':
                         default=None,
                         help=('compression parameter h in '
                               'theta = pi*x_2 + (1-h)/2 * sin(2*pi*x_2)'))
+    parser.add_argument('--abs', action='store_true',help=('plot abs(values) instead of values'))
     args = parser.parse_args()
     main(**vars(args))
